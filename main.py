@@ -42,26 +42,61 @@ async def check_mongodb_connection():
 @app.get("/api-python/v1/ProcessRequest/{request_id}")
 async def process_request(request_id: str):
     try:
-        latest_status = await mq.get_latest_status("status_queue", request_id)
+        MAX_RETRIES = 3
+
+        latest_doc = await mq.db["status_queue"].find_one(
+            {"request_id": request_id},
+            sort=[("timestamp", -1)]
+        )
+        latest_status = latest_doc["status"] if latest_doc else None
+        retry_count = latest_doc.get("retry_count", 0) if latest_doc else 0
+
         if latest_status:
-            if latest_status in ["Queued", "Processing"]:
+            status_lc = latest_status.lower()
+
+            if status_lc in ["queued", "processing"]:
                 return {
                     "Request_Id": request_id,
-                    "status": latest_status.lower(),
+                    "status": status_lc,
                     "message": f"Request is already {latest_status}",
                     "code": 202
                 }
 
-        await mq.publish("request_queue", request_id)
-        await mq.publish("status_queue", request_id)
+            if status_lc == "completed":
+                return {
+                    "Request_Id": request_id,
+                    "status": status_lc,
+                    "message": "Request has already completed. No retry needed.",
+                    "code": 200
+                }
 
-        # Run the processing logic immediately (no background worker)
+            if status_lc == "failed" and retry_count >= MAX_RETRIES:
+                return {
+                    "Request_Id": request_id,
+                    "status": "failed",
+                    "message": f"Retry limit reached ({retry_count}). Cannot retry further.",
+                    "code": 429
+                }
+
+        # Retry allowed
+        retry_count += 1
+        print(f"[INFO] Retrying request_id: {request_id}, retry #{retry_count}")
+
+        await mq.publish("request_queue", {"request_id": request_id, "retry_count": retry_count})
+        await mq.publish("status_queue", {
+            "request_id": request_id,
+            "status": "queued",
+            "retry_count": retry_count,
+            "timestamp": time.time()
+        })
+
         result = await code_fixer.process_request_logic(request_id)
         status = "Completed" if result.get("status") == "success" else "Failed"
 
         await mq.publish("status_queue", {
             "request_id": request_id,
             "status": status,
+            "retry_count": retry_count,
             "response": result,
             "timestamp": time.time()
         })
@@ -69,5 +104,5 @@ async def process_request(request_id: str):
         return result
 
     except Exception as e:
-        print(e)
+        print(f"[ERROR] {e}")
         return {"status": "error", "message": str(e), "code": 500}
