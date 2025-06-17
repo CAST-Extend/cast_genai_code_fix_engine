@@ -9,15 +9,21 @@ from app_logger import AppLogger
 from app_mongo import AppMongoDb
 from utils import generate_unique_alphanumeric, get_timestamp, replace_lines
 
+
 class AppCodeFixer:
-    def __init__(self, app_logger: AppLogger, mongo_db: AppMongoDb, ai_model: AppLLM, imaging: AppImaging):
+    def __init__(
+        self,
+        app_logger: AppLogger,
+        mongo_db: AppMongoDb,
+        ai_model: AppLLM,
+        imaging: AppImaging,
+    ):
         self.app_logger = app_logger
         self.mongo_db = mongo_db
         self.llm = ai_model
         self.imaging = imaging
         self.first_prompt = True
 
-    # private methods
     async def __gen_code_connected_json(
         self,
         ApplicationName: str,
@@ -26,105 +32,201 @@ class AppCodeFixer:
         ObjectID: str,
         PromptContent: str,
         json_resp: str,
-        engine_output: Dict[str, Any]
+        engine_output: Dict[str, Any],
     ) -> Dict[str, Any]:
         try:
             object_dictionary = {"objectid": ObjectID, "status": "", "message": ""}
-            content_info_dictionary = {"filefullname": "", "objects": [], "originalfilecontent": ""}
+            content_info_dictionary = {
+                "filefullname": "",
+                "objects": [],
+                "originalfilecontent": "",
+            }
 
             object_id = ObjectID
-            print("---------------------------------------------------------------------------------------------------------------------------------------")
+            print(
+                "---------------------------------------------------------------------------------------------------------------------------------------"
+            )
             print(f"\n Processing object_id -> {object_id}.....")
 
             # Initialize DataFrames to store exceptions and impacts
             exceptions = pd.DataFrame(columns=["link_type", "exception"])
-            impacts = pd.DataFrame(columns=["object_type", "object_signature", "object_link_type", "object_code"])
+            impacts = pd.DataFrame(
+                columns=[
+                    "object_type",
+                    "object_signature",
+                    "object_link_type",
+                    "object_code",
+                ]
+            )
 
             # Construct URL to fetch object details
-            object_response, object_url = await self.imaging.get_source_locations(TenantName, ApplicationName, object_id)
+            object_response, object_url = await self.imaging.get_source_locations(
+                TenantName, ApplicationName, object_id
+            )
 
             # Check if object details were fetched successfully
             if object_response.status_code == 200:
                 object_data = object_response.json()  # Parse object data
                 object_type = object_data["typeId"]  # Get object type
                 object_signature = object_data["mangling"]  # Get object signature
-                object_technology = object_data["programmingLanguage"]["name"]  # Get programming language
+                object_technology = object_data["programmingLanguage"][
+                    "name"
+                ]  # Get programming language
 
                 if object_data["sourceLocations"] is None:
                     object_dictionary["status"] = "failure"
-                    object_dictionary["message"] = f"failed because of reason: sourceLocations not available for this object from Imaging API -> {object_url}"
-                    print(object_dictionary["message"])
-                    engine_output["objects"].append(object_dictionary)
-                    return engine_output
-                
-                if object_data["external"] == "true":
-                    object_dictionary["status"] = "failure"
-                    object_dictionary["message"] = f"failed because of reason: It is an external object and it does not contains sourceLocations."
+                    object_dictionary["message"] = (
+                        f"failed because of reason: sourceLocations not available for this object from Imaging API -> {object_url}"
+                    )
                     print(object_dictionary["message"])
                     engine_output["objects"].append(object_dictionary)
                     return engine_output
 
-                source_location = object_data["sourceLocations"][0]  # Extract source location
+                if object_data["external"] == "true":
+                    object_dictionary["status"] = "failure"
+                    object_dictionary["message"] = (
+                        f"failed because of reason: It is an external object and it does not contains sourceLocations."
+                    )
+                    print(object_dictionary["message"])
+                    engine_output["objects"].append(object_dictionary)
+                    return engine_output
+
+                source_location = object_data["sourceLocations"][
+                    0
+                ]  # Extract source location
                 object_source_path = source_location["filePath"]  # Get source file path
                 object_field_id = source_location["fileId"]  # Get file ID
-                object_start_line = source_location["startLine"]  # Get start line number
+                object_start_line = source_location[
+                    "startLine"
+                ]  # Get start line number
                 object_end_line = source_location["endLine"]  # Get end line number
 
                 # fetch object code
-                obj_code = await self.imaging.get_source('object', TenantName, ApplicationName, object_field_id, object_start_line, object_end_line)
+                obj_code = await self.imaging.get_source(
+                    "object",
+                    TenantName,
+                    ApplicationName,
+                    object_field_id,
+                    object_start_line,
+                    object_end_line,
+                )
 
                 # Fetch callees for the current object
-                object_callees_response, object_callees_url = await self.imaging.get_callees(TenantName, ApplicationName, object_id)
+                object_callees_response, object_callees_url = (
+                    await self.imaging.get_callees(
+                        TenantName, ApplicationName, object_id
+                    )
+                )
 
                 # Check if callees were fetched successfully
                 if object_callees_response.status_code == 200:
-                    object_exceptions = object_callees_response.json()  # Parse exceptions data
+                    object_exceptions = (
+                        object_callees_response.json()
+                    )  # Parse exceptions data
                     # Process each exception for the current object
                     for object_exception in object_exceptions:
-                        link_type = object_exception.get("linkType", "").lower()  # Get link type
-                        if link_type in ["raise","throw","catch"]:  # Check for relevant link types
-                            new_row = pd.DataFrame({"link_type": [object_exception.get("linkType", "")], "exception": [object_exception.get("name", "")]})
-                            exceptions = pd.concat([exceptions, new_row], ignore_index=True)  # Append to exceptions DataFrame
+                        link_type = object_exception.get(
+                            "linkType", ""
+                        ).lower()  # Get link type
+                        if link_type in [
+                            "raise",
+                            "throw",
+                            "catch",
+                        ]:  # Check for relevant link types
+                            new_row = pd.DataFrame(
+                                {
+                                    "link_type": [object_exception.get("linkType", "")],
+                                    "exception": [object_exception.get("name", "")],
+                                }
+                            )
+                            exceptions = pd.concat(
+                                [exceptions, new_row], ignore_index=True
+                            )  # Append to exceptions DataFrame
                 else:
-                    print(f"Failed to fetch callees using {object_callees_url}. Status code: {object_callees_response.status_code}")
+                    print(
+                        f"Failed to fetch callees using {object_callees_url}. Status code: {object_callees_response.status_code}"
+                    )
 
                 # Fetch callers for the current object
-                object_callers_response, object_callers_url = await self.imaging.get_callers(TenantName, ApplicationName, object_id)
+                object_callers_response, object_callers_url = (
+                    await self.imaging.get_callers(
+                        TenantName, ApplicationName, object_id
+                    )
+                )
 
                 # Check if callers were fetched successfully
                 if object_callers_response.status_code == 200:
-                    impact_objects = object_callers_response.json()  # Parse impact objects data
+                    impact_objects = (
+                        object_callers_response.json()
+                    )  # Parse impact objects data
                     # Process each impact object
                     for impact_object in impact_objects:
-                        impact_object_id = impact_object.get("id")  # Get impact object ID
-                        impact_object_response, impact_object_url = await self.imaging.get_source_locations(TenantName, ApplicationName, impact_object_id)
+                        impact_object_id = impact_object.get(
+                            "id"
+                        )  # Get impact object ID
+                        impact_object_response, impact_object_url = (
+                            await self.imaging.get_source_locations(
+                                TenantName, ApplicationName, impact_object_id
+                            )
+                        )
 
                         # Check if impact object data was fetched successfully
                         if impact_object_response.status_code == 200:
-                            impact_object_data = impact_object_response.json()  # Parse impact object data
-                            impact_object_type = impact_object_data.get("typeId", "")  # Get impact object type
-                            impact_object_signature = impact_object_data.get("mangling", "")  # Get impact object signature
-                            impact_object_source_location = impact_object_data["sourceLocations"][0]  # Extract source location
-                            impact_object_source_path = impact_object_source_location["filePath"]  # Get source file path
-                            impact_object_field_id = int(impact_object_source_location["fileId"])  # Get file ID
-                            impact_object_start_line = int(impact_object_source_location["startLine"])  # Get start line number
-                            impact_object_end_line = int(impact_object_source_location["endLine"])  # Get end line number
+                            impact_object_data = (
+                                impact_object_response.json()
+                            )  # Parse impact object data
+                            impact_object_type = impact_object_data.get(
+                                "typeId", ""
+                            )  # Get impact object type
+                            impact_object_signature = impact_object_data.get(
+                                "mangling", ""
+                            )  # Get impact object signature
+                            impact_object_source_location = impact_object_data[
+                                "sourceLocations"
+                            ][
+                                0
+                            ]  # Extract source location
+                            impact_object_source_path = impact_object_source_location[
+                                "filePath"
+                            ]  # Get source file path
+                            impact_object_field_id = int(
+                                impact_object_source_location["fileId"]
+                            )  # Get file ID
+                            impact_object_start_line = int(
+                                impact_object_source_location["startLine"]
+                            )  # Get start line number
+                            impact_object_end_line = int(
+                                impact_object_source_location["endLine"]
+                            )  # Get end line number
 
                             if impact_object_data["external"] == "true":
                                 object_dictionary["status"] = "failure"
-                                object_dictionary["message"] = f"failed because of reason: It is an external object and it does not contains sourceLocations."
+                                object_dictionary["message"] = (
+                                    f"failed because of reason: It is an external object and it does not contains sourceLocations."
+                                )
                                 print(object_dictionary["message"])
                                 engine_output["objects"].append(object_dictionary)
                                 return engine_output
 
-                            impact_object_full_code = await self.imaging.get_source('impact object', TenantName, ApplicationName, impact_object_field_id, impact_object_start_line, impact_object_end_line)
+                            impact_object_full_code = await self.imaging.get_source(
+                                "impact object",
+                                TenantName,
+                                ApplicationName,
+                                impact_object_field_id,
+                                impact_object_start_line,
+                                impact_object_end_line,
+                            )
 
                         else:
                             impact_object_type = ""
                             impact_object_signature = ""
-                            print(f"Failed to fetch impact object data using {impact_object_url}. Status code: {impact_object_response.status_code}")
+                            print(
+                                f"Failed to fetch impact object data using {impact_object_url}. Status code: {impact_object_response.status_code}"
+                            )
 
-                        impact_object_link_type = impact_object.get("linkType", "")  # Get link type for impact object
+                        impact_object_link_type = impact_object.get(
+                            "linkType", ""
+                        )  # Get link type for impact object
 
                         # Handle bookmarks associated with the impact object
                         bookmarks = impact_object.get("bookmarks")
@@ -132,11 +234,24 @@ class AppCodeFixer:
                             impact_object_bookmark_code = ""
                         else:
                             bookmark = bookmarks[0]
-                            impact_object_bookmark_field_id = bookmark.get("fileId", "")  # Get file ID from bookmark
+                            impact_object_bookmark_field_id = bookmark.get(
+                                "fileId", ""
+                            )  # Get file ID from bookmark
                             # Calculate start and end lines for impact object code
-                            impact_object_bookmark_start_line = max(int(bookmark.get("startLine", 1)) - 1, 0)
-                            impact_object_bookmark_end_line = max(int(bookmark.get("endLine", 1)) - 1, 0)
-                            impact_object_bookmark_code = await self.imaging.get_source('impact object bookmark', TenantName, ApplicationName, impact_object_bookmark_field_id, impact_object_bookmark_start_line, impact_object_bookmark_end_line)
+                            impact_object_bookmark_start_line = max(
+                                int(bookmark.get("startLine", 1)) - 1, 0
+                            )
+                            impact_object_bookmark_end_line = max(
+                                int(bookmark.get("endLine", 1)) - 1, 0
+                            )
+                            impact_object_bookmark_code = await self.imaging.get_source(
+                                "impact object bookmark",
+                                TenantName,
+                                ApplicationName,
+                                impact_object_bookmark_field_id,
+                                impact_object_bookmark_start_line,
+                                impact_object_bookmark_end_line,
+                            )
 
                         # Append the impact object data to the impacts DataFrame
                         new_impact_row = pd.DataFrame(
@@ -153,21 +268,32 @@ class AppCodeFixer:
                                 "object_full_code": [impact_object_full_code],
                             }
                         )
-                        impacts = pd.concat([impacts, new_impact_row], ignore_index=True)
+                        impacts = pd.concat(
+                            [impacts, new_impact_row], ignore_index=True
+                        )
                 else:
-                    print(f"Failed to fetch callers using {object_callers_url}. Status code: {object_callers_response.status_code}")
+                    print(
+                        f"Failed to fetch callers using {object_callers_url}. Status code: {object_callers_response.status_code}"
+                    )
             else:
-                print(f"Failed to fetch object data using {object_url}. Status code: {object_response.status_code}")  # Skip to the next object if there is an error
+                print(
+                    f"Failed to fetch object data using {object_url}. Status code: {object_response.status_code}"
+                )  # Skip to the next object if there is an error
 
             if not exceptions.empty:
                 # Group exceptions by link type and aggregate unique exceptions
-                grouped_exceptions = exceptions.groupby("link_type")["exception"].unique()
+                grouped_exceptions = exceptions.groupby("link_type")[
+                    "exception"
+                ].unique()
 
                 # Construct exception text
                 exception_text = (
                     f"Take into account that {object_type} <{object_signature}>: "
                     + "; ".join(
-                        [f"{link_type} {', '.join(exc)}" for link_type, exc in grouped_exceptions.items()]
+                        [
+                            f"{link_type} {', '.join(exc)}"
+                            for link_type, exc in grouped_exceptions.items()
+                        ]
                     )
                 )
                 # print(f"exception_text = {exception_text}")
@@ -215,13 +341,18 @@ class AppCodeFixer:
 
             # Count tokens for the AI model's input
             code_token = await self.llm.count_tokens(str(obj_code))
-            prompt_token = await self.llm.count_tokens("\n".join([json.dumps(m) for m in messages]))
+            prompt_token = await self.llm.count_tokens(
+                "\n".join([json.dumps(m) for m in messages])
+            )
 
             # Determine target response size
             target_response_size = int(code_token * 1.2 + 500)
 
             # Check if the prompt length is within acceptable limits
-            if prompt_token < (self.llm.model_max_input_tokens - target_response_size) and target_response_size < self.llm.model_max_output_tokens:
+            if (
+                prompt_token < (self.llm.model_max_input_tokens - target_response_size)
+                and target_response_size < self.llm.model_max_output_tokens
+            ):
                 # Ask the AI model for a response
                 response_content, ai_msg, tokens = await self.llm.ask_ai_model(
                     prompt_content,
@@ -247,13 +378,17 @@ class AppCodeFixer:
 
                         end_comment = "\n// End of GEN AI fix"
 
-                        new_code = response_content["code"]  # Extract new code from the response
+                        new_code = response_content[
+                            "code"
+                        ]  # Extract new code from the response
                         readable_code = new_code
                         start_line = object_start_line
                         end_line = object_end_line
 
                         # fetch object code
-                        file_content = await self.imaging.get_file('object', TenantName, ApplicationName, object_field_id)
+                        file_content = await self.imaging.get_file(
+                            "object", TenantName, ApplicationName, object_field_id
+                        )
 
                         file_content = file_content.splitlines(keepends=True)
                         file_path = object_source_path
@@ -268,21 +403,41 @@ class AppCodeFixer:
                             for i, file in enumerate(engine_output["contentinfo"]):
                                 if file["filefullname"] == file_fullname:
                                     file_flag = True
-                                    engine_output["contentinfo"][i]["objects"].append(object_id)
-                                    engine_output["contentinfo"][i]["originalfilecontent"][1][0][f"({start_line},{end_line})"] = comment + readable_code + end_comment
+                                    engine_output["contentinfo"][i]["objects"].append(
+                                        object_id
+                                    )
+                                    engine_output["contentinfo"][i][
+                                        "originalfilecontent"
+                                    ][1][0][f"({start_line},{end_line})"] = (
+                                        comment + readable_code + end_comment
+                                    )
 
                         if not file_flag:
                             content_info_dictionary["filefullname"] = file_fullname
                             content_info_dictionary["objects"].append(object_id)
-                            content_info_dictionary["originalfilecontent"] = [file_content, [{f"({start_line},{end_line})": comment + readable_code + end_comment}]]
+                            content_info_dictionary["originalfilecontent"] = [
+                                file_content,
+                                [
+                                    {
+                                        f"({start_line},{end_line})": comment
+                                        + readable_code
+                                        + end_comment
+                                    }
+                                ],
+                            ]
 
-                        if content_info_dictionary["filefullname"] or content_info_dictionary["originalfilecontent"]:
+                        if (
+                            content_info_dictionary["filefullname"]
+                            or content_info_dictionary["originalfilecontent"]
+                        ):
                             engine_output["contentinfo"].append(content_info_dictionary)
 
-                        if (response_content["signature_impact"].upper() == "YES"
+                        if (
+                            response_content["signature_impact"].upper() == "YES"
                             or response_content["exception_impact"].upper() == "YES"
                             or response_content["enclosed_impact"].upper() == "YES"
-                            or response_content["other_impact"].upper() == "YES"):
+                            or response_content["other_impact"].upper() == "YES"
+                        ):
 
                             if not impacts.empty:
                                 for i, row in impacts.iterrows():
@@ -300,31 +455,49 @@ class AppCodeFixer:
                                                     for the following reason: [{response_content['comment'] if response_content['impact_comment'] == 'NA' else response_content['impact_comment']}]."""
 
                                     # fetch object code
-                                    dep_object_file_content = await self.imaging.get_file('dep object', TenantName, ApplicationName, int(row["object_file_id"]))
+                                    dep_object_file_content = (
+                                        await self.imaging.get_file(
+                                            "dep object",
+                                            TenantName,
+                                            ApplicationName,
+                                            int(row["object_file_id"]),
+                                        )
+                                    )
 
-                                    dep_object_file_content = dep_object_file_content.splitlines(keepends=True)
+                                    dep_object_file_content = (
+                                        dep_object_file_content.splitlines(
+                                            keepends=True
+                                        )
+                                    )
                                     dep_object_file_path = object_source_path
 
-                                    object_data, contentinfo_data, engine_output = await self.__check_dependent_code_json(
-                                        ObjectID,
-                                        row["object_type"],
-                                        row["object_signature"],
-                                        row["object_full_code"],
-                                        parent_info,
-                                        row["object_start_line"],
-                                        row["object_end_line"],
-                                        row["object_id"],
-                                        row["object_source_path"],
-                                        RepoName,
-                                        dep_object_file_content,
-                                        dep_object_file_path,
-                                        engine_output
+                                    object_data, contentinfo_data, engine_output = (
+                                        await self.__check_dependent_code_json(
+                                            ObjectID,
+                                            row["object_type"],
+                                            row["object_signature"],
+                                            row["object_full_code"],
+                                            parent_info,
+                                            row["object_start_line"],
+                                            row["object_end_line"],
+                                            row["object_id"],
+                                            row["object_source_path"],
+                                            RepoName,
+                                            dep_object_file_content,
+                                            dep_object_file_path,
+                                            engine_output,
+                                        )
                                     )
 
                                     engine_output["objects"].append(object_data)
 
-                                    if contentinfo_data["filefullname"] or contentinfo_data["originalfilecontent"]:
-                                        engine_output["contentinfo"].append(contentinfo_data)
+                                    if (
+                                        contentinfo_data["filefullname"]
+                                        or contentinfo_data["originalfilecontent"]
+                                    ):
+                                        engine_output["contentinfo"].append(
+                                            contentinfo_data
+                                        )
 
                     else:
                         object_dictionary["status"] = "Unmodified"
@@ -333,7 +506,9 @@ class AppCodeFixer:
             else:
                 print("Prompt too long; skipping.")  # Warn if the prompt exceeds limits
                 object_dictionary["status"] = "failure"
-                object_dictionary["message"] = "failed because of reason: prompt too long"
+                object_dictionary["message"] = (
+                    "failed because of reason: prompt too long"
+                )
 
             engine_output["objects"].append(object_dictionary)
 
@@ -358,11 +533,20 @@ class AppCodeFixer:
         RepoName: str,
         dep_object_file_content: List[str],
         dep_object_file_path: str,
-        engine_output: Dict[str, Any]
+        engine_output: Dict[str, Any],
     ) -> tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
         try:
-            object_dictionary = {"objectid": dep_object_id, "status": "", "message": "", "dependent_info": f"this object is depenedent on ObjectID-{ObjectID}"}
-            content_info_dictionary = {"filefullname": "", "objects": [], "originalfilecontent": ""}
+            object_dictionary = {
+                "objectid": dep_object_id,
+                "status": "",
+                "message": "",
+                "dependent_info": f"this object is depenedent on ObjectID-{ObjectID}",
+            }
+            content_info_dictionary = {
+                "filefullname": "",
+                "objects": [],
+                "originalfilecontent": "",
+            }
 
             json_dep_resp = """
             {
@@ -379,18 +563,18 @@ class AppCodeFixer:
 
             # Construct the prompt for the AI model
             prompt_content = (
-                            f"CONTEXT: {dep_object_type} <{dep_object_signature}> is dependent on code that was modified by an AI: \n"
-                            f"{parent_info if parent_info else ''} \n"
-                            f"TASK:\n"
-                            f"Check and update if needed the following code: \n"
-                            f"'''\n{dep_obj_code}\n'''"
-                            f"GUIDELINES: \n"
-                            f"Use the following JSON structure to respond: \n"
-                            f"'''\n{json_dep_resp}\n'''\n"
-                            f"\nMake sure your response is a valid JSON string.\nRespond only the JSON string, and only the JSON string. "
-                            f"Do not enclose the JSON string in triple quotes, backslashes, ... Do not add comments outside of the JSON structure.\n"
+                f"CONTEXT: {dep_object_type} <{dep_object_signature}> is dependent on code that was modified by an AI: \n"
+                f"{parent_info if parent_info else ''} \n"
+                f"TASK:\n"
+                f"Check and update if needed the following code: \n"
+                f"'''\n{dep_obj_code}\n'''"
+                f"GUIDELINES: \n"
+                f"Use the following JSON structure to respond: \n"
+                f"'''\n{json_dep_resp}\n'''\n"
+                f"\nMake sure your response is a valid JSON string.\nRespond only the JSON string, and only the JSON string. "
+                f"Do not enclose the JSON string in triple quotes, backslashes, ... Do not add comments outside of the JSON structure.\n"
             )
-            
+
             # print(f"Prompt Content: {prompt_content}")
 
             # Prepare messages for the AI model
@@ -398,13 +582,18 @@ class AppCodeFixer:
 
             # Count tokens for the AI model's input
             code_token = await self.llm.count_tokens(str(dep_obj_code))
-            prompt_token = await self.llm.count_tokens("\n".join([json.dumps(m) for m in messages]))
+            prompt_token = await self.llm.count_tokens(
+                "\n".join([json.dumps(m) for m in messages])
+            )
 
             # Determine target response size
             target_response_size = int(code_token * 1.2 + 500)
 
             # Check if the prompt length is within acceptable limits
-            if prompt_token < (self.llm.model_max_input_tokens - target_response_size) and target_response_size < self.llm.model_max_output_tokens:
+            if (
+                prompt_token < (self.llm.model_max_input_tokens - target_response_size)
+                and target_response_size < self.llm.model_max_output_tokens
+            ):
                 # Ask the AI model for a response
                 response_content, ai_msg, tokens = await self.llm.ask_ai_model(
                     prompt_content,
@@ -432,8 +621,14 @@ class AppCodeFixer:
                         comment = f" {comment_str} This code is fixed by GEN AI \n {comment_str} AI update comment : {response_content['comment']} \n {comment_str} AI missing information : {response_content['missing_information']} \n {comment_str} AI signature impact : {response_content['signature_impact']} \n {comment_str} AI exception impact : {response_content['exception_impact']} \n {comment_str} AI enclosed code impact : {response_content['enclosed_impact']} \n {comment_str} AI other impact : {response_content['other_impact']} \n {comment_str} AI impact comment : {response_content['impact_comment']} \n"
                         end_comment = "\n// End of GEN AI fix"
 
-                        new_code = response_content["code"]  # Extract new code from the response
-                        readable_code = (new_code.replace("\\n", "\n").replace('\\"', '"').replace("\\\\", "\\"))
+                        new_code = response_content[
+                            "code"
+                        ]  # Extract new code from the response
+                        readable_code = (
+                            new_code.replace("\\n", "\n")
+                            .replace('\\"', '"')
+                            .replace("\\\\", "\\")
+                        )
                         start_line = int(dep_object_start_line)
                         end_line = int(dep_object_end_line)
 
@@ -447,13 +642,28 @@ class AppCodeFixer:
                             for i, file in enumerate(engine_output["contentinfo"]):
                                 if file["filefullname"] == file_fullname:
                                     file_flag = True
-                                    engine_output["contentinfo"][i]["objects"].append(dep_object_id)
-                                    engine_output["contentinfo"][i]["originalfilecontent"][1][0][f"({start_line},{end_line})"] = comment + readable_code + end_comment
+                                    engine_output["contentinfo"][i]["objects"].append(
+                                        dep_object_id
+                                    )
+                                    engine_output["contentinfo"][i][
+                                        "originalfilecontent"
+                                    ][1][0][f"({start_line},{end_line})"] = (
+                                        comment + readable_code + end_comment
+                                    )
 
                         if not file_flag:
                             content_info_dictionary["filefullname"] = file_fullname
                             content_info_dictionary["objects"].append(dep_object_id)
-                            content_info_dictionary["originalfilecontent"] = [dep_object_file_content, [{f"({start_line},{end_line})": comment + readable_code + end_comment}]]
+                            content_info_dictionary["originalfilecontent"] = [
+                                dep_object_file_content,
+                                [
+                                    {
+                                        f"({start_line},{end_line})": comment
+                                        + readable_code
+                                        + end_comment
+                                    }
+                                ],
+                            ]
 
                     else:
                         object_dictionary["status"] = "Unmodified"
@@ -465,7 +675,9 @@ class AppCodeFixer:
             else:
                 print("Prompt too long; skipping.")  # Warn if the prompt exceeds limits
                 object_dictionary["status"] = "failure"
-                object_dictionary["message"] = "failed because of reason: prompt too long"
+                object_dictionary["message"] = (
+                    "failed because of reason: prompt too long"
+                )
 
                 return object_dictionary, content_info_dictionary, engine_output
         except Exception as e:
@@ -476,6 +688,7 @@ class AppCodeFixer:
 
     async def __resend_fullfile_to_ai(self, full_code: str) -> str:
         try:
+            print("Gen AI is checking full file.......................")
             json_resp = """
             {
             "updated":"<YES/NO to state if you updated the code or not (if you believe it did not need fixing)>",
@@ -492,7 +705,7 @@ class AppCodeFixer:
                 "3) add single line comments saying that this is fixed by Gen AI for the lines only fixed by Gen AI.\n"
                 "4) do not remove already existing comments.\n"
                 "5) indent the code properly.\n"
-                f"'''\n{full_code}\n'''\n"  
+                f"'''\n{full_code}\n'''\n"
                 "GUIDELINES:\n"
                 f"Use the following JSON structure to respond:\n'''\n{json_resp}\n'''\n"
                 "Make sure your response is a valid JSON string.\nRespond only the JSON string, and only the JSON string.\n"
@@ -506,13 +719,18 @@ class AppCodeFixer:
 
             # Count tokens for the AI model's input
             code_token = await self.llm.count_tokens(str(full_code))
-            prompt_token = await self.llm.count_tokens("\n".join([json.dumps(m) for m in messages]))
+            prompt_token = await self.llm.count_tokens(
+                "\n".join([json.dumps(m) for m in messages])
+            )
 
             # Determine target response size
             target_response_size = int(code_token * 1.2 + 500)
 
             # Check if the prompt length is within acceptable limits
-            if prompt_token < (self.llm.model_max_input_tokens - target_response_size) and target_response_size < self.llm.model_max_output_tokens:
+            if (
+                prompt_token < (self.llm.model_max_input_tokens - target_response_size)
+                and target_response_size < self.llm.model_max_output_tokens
+            ):
                 # Ask the AI model for a response
                 response_content, _, tokens = await self.llm.ask_ai_model(
                     prompt_content,
@@ -520,7 +738,7 @@ class AppCodeFixer:
                     max_tokens=target_response_size,
                 )
                 # print(f"Response Content: {response_content}")
-                
+
                 if response_content is None:
                     return full_code
                 else:
@@ -531,8 +749,8 @@ class AppCodeFixer:
 
         except Exception as e:
             # Catch and print any errors that occur.
-            print(f"An error occurred: {e}")
-            await self.app_logger.log_error(e, "resend_fullfile_to_ai")
+            print(f"An error occurred while checking full file: {e}")
+            # await self.app_logger.log_error(e, "resend_fullfile_to_ai")
 
     # Function containing the original processing logic (refactored for reuse)
     async def process_request_logic(self, request_id: str) -> Dict[str, Any]:
@@ -560,7 +778,9 @@ class AppCodeFixer:
             engine_output_collection = self.mongo_db.get_collection("EngineOutput")
             files_content_collection = self.mongo_db.get_collection("FilesContent")
 
-            engine_input_document = await engine_input_collection.find_one({"request.requestid": f"{request_id}"})
+            engine_input_document = await engine_input_collection.find_one(
+                {"request.requestid": f"{request_id}"}
+            )
 
             for request in engine_input_document["request"]:
                 if request["requestid"] == request_id:
@@ -592,29 +812,35 @@ class AppCodeFixer:
                     for requestdetail in request["requestdetail"]:
                         prompt_id = requestdetail["promptid"]
 
-                        prompt_library_documents = prompt_library_collection.find({"issueid": int(IssueID)})
+                        prompt_library_documents = prompt_library_collection.find(
+                            {"issueid": int(IssueID)}
+                        )
 
                         async for prompt_library_doc in prompt_library_documents:
                             for technology in prompt_library_doc["technologies"]:
                                 for prompt in technology["prompts"]:
                                     if prompt_id == prompt["promptid"]:
                                         PromptContent = prompt["prompt"]
-                                        for objectdetail in requestdetail["objectdetails"]:
+                                        for objectdetail in requestdetail[
+                                            "objectdetails"
+                                        ]:
                                             ObjectID = objectdetail["objectid"]
 
                                             # Call the gen_code_connected_json function to process the request and generate code updates
-                                            engine_output = await self.__gen_code_connected_json(
-                                                ApplicationName,
-                                                TenantName,
-                                                RepoName,
-                                                ObjectID,
-                                                PromptContent,
-                                                json_resp,
-                                                engine_output
+                                            engine_output = (
+                                                await self.__gen_code_connected_json(
+                                                    ApplicationName,
+                                                    TenantName,
+                                                    RepoName,
+                                                    ObjectID,
+                                                    PromptContent,
+                                                    json_resp,
+                                                    engine_output,
+                                                )
                                             )
 
-                    for object in engine_output['objects']:
-                        objects_status_list.append(object['status'])
+                    for object in engine_output["objects"]:
+                        objects_status_list.append(object["status"])
 
                     if all(item == "Unmodified" for item in objects_status_list):
                         engine_output["status"] = "Unmodified"
@@ -630,71 +856,108 @@ class AppCodeFixer:
                         replacements = {}
                         for key, value in content["originalfilecontent"][1][0].items():
                             tuple_value = ast.literal_eval(key)
-                            replacements[tuple_value] = value.split('\n')
-                            replacements[tuple_value] = [line + "\n" for line in replacements[tuple_value]]
+                            replacements[tuple_value] = value.split("\n")
+                            replacements[tuple_value] = [
+                                line + "\n" for line in replacements[tuple_value]
+                            ]
 
                         # Run the function with the lines and replacements
-                        modified_lines = replace_lines(self.app_logger, lines, replacements)
+                        modified_lines = replace_lines(
+                            self.app_logger, lines, replacements
+                        )
                         modified_lines = "".join(modified_lines)
-                        modified_lines = await self.__resend_fullfile_to_ai(modified_lines)
-                    
+                        modified_lines = await self.__resend_fullfile_to_ai(
+                            modified_lines
+                        )
+
                         # Generate a unique 24-character alphanumeric string
                         unique_string = generate_unique_alphanumeric()
                         content["fileid"] = unique_string
 
-                        file_path = content["filefullname"].replace('\\','/')
+                        file_path = content["filefullname"].replace("\\", "/")
 
                         if RepoName in file_path:
                             file_path = RepoName + file_path.split(RepoName)[-1]
 
-                        files_content_data = {"fileid": unique_string, "filepath": file_path, "updatedfilecontent": modified_lines}
+                        files_content_data = {
+                            "fileid": unique_string,
+                            "filepath": file_path,
+                            "updatedfilecontent": modified_lines,
+                        }
 
                         files_content["updatedcontentinfo"].append(files_content_data)
 
                     # Define the filter and update
-                    filter = {"request.requestid": f"{request_id}"}  # Match document with requestid
-                    update = {"$set": {"request.$[elem].status": f"{engine_output['status']}"}}  # Update the status for the matched request
-                    array_filters = [{"elem.requestid": f"{request_id}"}]  # Specify array filters
-                    await engine_input_collection.update_one(filter, update, array_filters=array_filters)  # Perform the update
+                    filter = {
+                        "request.requestid": f"{request_id}"
+                    }  # Match document with requestid
+                    update = {
+                        "$set": {"request.$[elem].status": f"{engine_output['status']}"}
+                    }  # Update the status for the matched request
+                    array_filters = [
+                        {"elem.requestid": f"{request_id}"}
+                    ]  # Specify array filters
+                    await engine_input_collection.update_one(
+                        filter, update, array_filters=array_filters
+                    )  # Perform the update
 
                     # Check if data already exists
-                    existing_record = await engine_output_collection.find_one({"requestid": engine_output["requestid"]})
+                    existing_record = await engine_output_collection.find_one(
+                        {"requestid": engine_output["requestid"]}
+                    )
 
                     if existing_record:
                         # Delete the existing record
-                        await engine_output_collection.delete_one({"requestid": engine_output["requestid"]})
-                        print(f"Existing requestid - {engine_output['requestid']} deleted in engine_output_collection.")
+                        await engine_output_collection.delete_one(
+                            {"requestid": engine_output["requestid"]}
+                        )
+                        print(
+                            f"Existing requestid - {engine_output['requestid']} deleted in engine_output_collection."
+                        )
 
                     # Insert the new data
                     await engine_output_collection.insert_one(engine_output)
-                    print(f"Data inserted into engine_output_collection for requestid - {engine_output['requestid']}")
+                    print(
+                        f"Data inserted into engine_output_collection for requestid - {engine_output['requestid']}"
+                    )
 
-                    files_content_exist = await files_content_collection.find_one({"requestid": files_content["requestid"]})
+                    files_content_exist = await files_content_collection.find_one(
+                        {"requestid": files_content["requestid"]}
+                    )
 
                     if files_content_exist:
                         # Delete the existing record
-                        await files_content_collection.delete_one({"requestid": files_content["requestid"]})
-                        print(f"Existing requestid - {files_content['requestid']} deleted in files_content_collection.")
-                    
+                        await files_content_collection.delete_one(
+                            {"requestid": files_content["requestid"]}
+                        )
+                        print(
+                            f"Existing requestid - {files_content['requestid']} deleted in files_content_collection."
+                        )
+
                     # Insert the new data
                     await files_content_collection.insert_one(files_content)
-                    print(f"Data inserted into files_content_collection for requestid - {engine_output['requestid']}")
+                    print(
+                        f"Data inserted into files_content_collection for requestid - {engine_output['requestid']}"
+                    )
 
                     return {
                         "Request_Id": request_id,
                         "status": "success",
                         "message": f"Req -> {request_id} Successful.",
-                        "code": 200
+                        "code": 200,
                     }
-                
+
                 else:
                     print(f"Req -> {request_id} Not Found or Incorrect EngineInput!")
-                    await self.app_logger.log_error(f"Req -> {request_id} Not Found or Incorrect EngineInput!", "process_request")
+                    await self.app_logger.log_error(
+                        f"Req -> {request_id} Not Found or Incorrect EngineInput!",
+                        "process_request",
+                    )
                     return {
                         "Request_Id": request_id,
                         "status": "failed",
                         "message": f"Req -> {request_id} Not Found or Incorrect EngineInput!",
-                        "code": 404
+                        "code": 404,
                     }
 
         except Exception as e:
@@ -704,6 +967,6 @@ class AppCodeFixer:
             return {
                 "Request_Id": request_id,
                 "status": "failed",
-                "message" : f"Internal Server Error -> {e}",
-                "code": 500
+                "message": f"Internal Server Error -> {e}",
+                "code": 500,
             }
