@@ -51,7 +51,7 @@ class AppLLM:
         messages = [{"role": "user", "content": prompt_content}]
         payload = {"model": self.model_name, "messages": messages, "temperature": 0}
 
-        async with httpx.AsyncClient(timeout=3000.0) as client:
+        async with httpx.AsyncClient(timeout=300.0) as client:
             for attempt in range(1, MAX_RETRIES + 1):
                 try:
                     response = await client.post(self.model_url, headers=self.headers, json=payload)

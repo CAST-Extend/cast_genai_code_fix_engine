@@ -1,9 +1,7 @@
-# app_mq_mongodb_async.py
+# app_mq_mongodb.py
 from motor.motor_asyncio import AsyncIOMotorClient
 import asyncio
 import time
-import json
-from bson import ObjectId
 from config import Config
 
 class MongoDBMQ():
@@ -14,62 +12,36 @@ class MongoDBMQ():
 
     async def publish(self, topic, message):
         try:
-            request_id = message.get("request_id") if isinstance(message, dict) else message
-            retry_count = message.get("retry_count", 0) if isinstance(message, dict) else 0
+            request_id = message.get("request_id")
+            message["timestamp"] = time.time()
+            message["request_id"] = request_id
 
-            doc = {
-                "status": "queued",
-                "timestamp": time.time(),
-                "request_id": request_id,
-                "retry_count": retry_count,
-                "message": message
-            }
-
-            print(f"[MongoDBMQ] Publishing to {topic}: {doc}")
-
-            # If topic is status_queue: update the latest status
-            if topic == "status_queue":
-                result = await self.db[topic].update_one(
-                    {"request_id": request_id},
-                    {"$set": doc},
-                    upsert=True
-                )
-                print(f"[MongoDBMQ] status_queue upsert: matched={result.matched_count}, inserted={result.upserted_id}")
-            else:
-                # For all others (like request_queue), upsert or insert
-                result = await self.db[topic].update_one(
-                    {"request_id": request_id, "status": {"$in": ["queued", "processing"]}},
-                    {"$set": doc},
-                    upsert=True
-                )
-                print(f"[MongoDBMQ] request_queue upsert: matched={result.matched_count}, inserted={result.upserted_id}")
-
+            await self.db[topic].update_one(
+                {"request_id": request_id},
+                {"$set": message},
+                upsert=True
+            )
             return request_id
-
         except Exception as e:
-            print(f"[MongoDBMQ] Error publishing to {topic}: {e}")
+            print(f"[MongoDBMQ] Publish error: {e}")
             return None
-
-
-    async def get_latest_status(self, topic, request_id):
-        doc = await self.db[topic].find_one({"request_id": request_id}, sort=[("timestamp", -1)])
-        return doc["status"] if doc else None
 
     async def get(self, topic, timeout=5):
         deadline = time.time() + timeout
         while time.time() < deadline:
             doc = await self.db[topic].find_one_and_update(
                 {"status": "queued"},
-                {"$set": {
-                    "status": "processing",
-                    "processing_start": time.time()
-                }},
+                {"$set": {"status": "processing", "processing_start": time.time()}},
                 sort=[("timestamp", 1)]
             )
             if doc:
-                return doc["message"]
+                return doc
             await asyncio.sleep(0.5)
         return None
+
+    async def get_latest_status(self, topic, request_id):
+        doc = await self.db[topic].find_one({"request_id": request_id}, sort=[("timestamp", -1)])
+        return doc["status"] if doc else None
 
     async def close(self):
         self.client.close()

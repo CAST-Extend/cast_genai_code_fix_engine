@@ -1,10 +1,10 @@
+# main.py
 import asyncio
 import time
-import json
-import requests
 import urllib3
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 from config import Config
 from app_logger import AppLogger
 from app_mongo import AppMongoDb
@@ -13,7 +13,6 @@ from app_imaging import AppImaging
 from app_code_fixer import AppCodeFixer
 from app_mq import AppMessageQueue
 
-# Suppress the InsecureRequestWarning
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 config = Config()
@@ -24,7 +23,49 @@ imaging = AppImaging(app_logger, config)
 code_fixer = AppCodeFixer(app_logger, mongo_db, ai_model, imaging)
 mq = AppMessageQueue(app_logger, config).open()
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async def worker():
+        print("[WORKER] Background queue processor started.")
+        while True:
+            try:
+                doc = await mq.get("status_queue", timeout=5)
+                if doc:
+                    request_id = doc["request_id"]
+                    retry_count = doc.get("retry_count", 0)
+
+                    print(f"[WORKER] Processing: {request_id}")
+                    await mq.db["audit_log"].insert_one({
+                        "request_id": request_id,
+                        "event": "processing",
+                        "timestamp": time.time()
+                    })
+
+                    result = await code_fixer.process_request_logic(request_id)
+                    status = "Completed" if result.get("status") == "success" else "Failed"
+
+                    await mq.publish("status_queue", {
+                        "request_id": request_id,
+                        "status": status.lower(),
+                        "retry_count": retry_count,
+                        "response": result
+                    })
+
+                    await mq.db["audit_log"].insert_one({
+                        "request_id": request_id,
+                        "event": status.lower(),
+                        "timestamp": time.time()
+                    })
+                else:
+                    await asyncio.sleep(1)
+            except Exception as e:
+                print(f"[WORKER ERROR] {e}")
+                await asyncio.sleep(2)
+
+    asyncio.create_task(worker())
+    yield
+
+app = FastAPI(lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 @app.get("/api-python/v1/")
@@ -42,67 +83,64 @@ async def check_mongodb_connection():
 @app.get("/api-python/v1/ProcessRequest/{request_id}")
 async def process_request(request_id: str):
     try:
-        MAX_RETRIES = 3
+        await mq.publish("status_queue", {
+            "request_id": request_id,
+            "status": "queued",
+            "retry_count": 0
+        })
+        await mq.db["audit_log"].insert_one({
+            "request_id": request_id,
+            "event": "queued",
+            "timestamp": time.time()
+        })
+        return {
+            "Request_Id": request_id,
+            "status": "queued",
+            "message": "Request has been enqueued for processing.",
+            "code": 202
+        }
+    except Exception as e:
+        print(f"[ERROR] {e}")
+        return {"status": "error", "message": str(e), "code": 500}
 
+@app.get("/api-python/v1/RequestStatus/{request_id}")
+async def get_request_status(request_id: str):
+    try:
         latest_doc = await mq.db["status_queue"].find_one(
             {"request_id": request_id},
             sort=[("timestamp", -1)]
         )
-        latest_status = latest_doc["status"] if latest_doc else None
-        retry_count = latest_doc.get("retry_count", 0) if latest_doc else 0
-
-        if latest_status:
-            status_lc = latest_status.lower()
-
-            if status_lc in ["queued", "processing"]:
-                return {
-                    "Request_Id": request_id,
-                    "status": status_lc,
-                    "message": f"Request is already {latest_status}",
-                    "code": 202
-                }
-
-            if status_lc == "completed":
-                return {
-                    "Request_Id": request_id,
-                    "status": status_lc,
-                    "message": "Request has already completed. No retry needed.",
-                    "code": 200
-                }
-
-            if status_lc == "failed" and retry_count >= MAX_RETRIES:
-                return {
-                    "Request_Id": request_id,
-                    "status": "failed",
-                    "message": f"Retry limit reached ({retry_count}). Cannot retry further.",
-                    "code": 429
-                }
-
-        # Retry allowed
-        retry_count += 1
-        print(f"[INFO] Retrying request_id: {request_id}, retry #{retry_count}")
-
-        await mq.publish("request_queue", {"request_id": request_id, "retry_count": retry_count})
-        await mq.publish("status_queue", {
-            "request_id": request_id,
-            "status": "queued",
-            "retry_count": retry_count,
-            "timestamp": time.time()
-        })
-
-        result = await code_fixer.process_request_logic(request_id)
-        status = "Completed" if result.get("status") == "success" else "Failed"
-
-        await mq.publish("status_queue", {
-            "request_id": request_id,
-            "status": status,
-            "retry_count": retry_count,
-            "response": result,
-            "timestamp": time.time()
-        })
-
-        return result
-
+        if not latest_doc:
+            return {
+                "Request_Id": request_id,
+                "status": "not_found",
+                "message": "No status found for this request ID",
+                "code": 404
+            }
+        return {
+            "Request_Id": request_id,
+            "status": latest_doc.get("status", "unknown"),
+            "retry_count": latest_doc.get("retry_count", 0),
+            "last_updated": latest_doc.get("timestamp"),
+            "response": latest_doc.get("response", {}),
+            "code": 200
+        }
     except Exception as e:
-        print(f"[ERROR] {e}")
+        print(f"[ERROR] Failed to get status for {request_id}: {e}")
+        return {"status": "error", "message": str(e), "code": 500}
+
+@app.get("/api-python/v1/ListPendingRequests")
+async def list_pending_requests():
+    try:
+        pending = mq.db["status_queue"].find({"status": "queued"})
+        results = []
+        async for doc in pending:
+            results.append({
+                "request_id": doc["request_id"],
+                "status": doc["status"],
+                "timestamp": doc["timestamp"]
+            })
+        return {"status": 200, "pending_requests": results}
+    except Exception as e:
+        print(f"[ERROR] Listing pending requests: {e}")
         return {"status": "error", "message": str(e), "code": 500}
